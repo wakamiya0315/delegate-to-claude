@@ -1,4 +1,6 @@
 interface:
   display_name: "Delegate to Claude"
-  short_description: "Delegate bounded coding work to Claude Sonnet"
-  default_prompt: "Use $delegate-to-claude to delegate this bounded task to a supervised Claude Sonnet worker."
+  short_description: "Delegate routine coding to Claude Sonnet"
+  default_prompt: "Use $delegate-to-claude to hand this routine coding task to a supervised Sonnet worker with a concise prompt."
+policy:
+  allow_implicit_invocation: true

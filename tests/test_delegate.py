@@ -32,6 +32,10 @@ capture_settings = os.environ.get("FAKE_CAPTURE_SETTINGS")
 if capture_settings:
     settings_path = Path(sys.argv[sys.argv.index("--settings") + 1])
     Path(capture_settings).write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
+worker_prompt = sys.stdin.read()
+capture_prompt = os.environ.get("FAKE_CAPTURE_PROMPT")
+if capture_prompt:
+    Path(capture_prompt).write_text(worker_prompt, encoding="utf-8")
 marker = os.environ.get("FAKE_RUN_MARKER")
 if marker:
     Path(marker).write_text("called", encoding="utf-8")
@@ -157,19 +161,19 @@ class DelegateLauncherTests(unittest.TestCase):
         effort: str = "medium",
         env: dict[str, str] | None = None,
         dry_run: bool = False,
+        quick_prompt: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             sys.executable,
             str(LAUNCHER),
             "--cwd",
             str(self.repo),
-            "--task-file",
-            str(self.task),
-            "--mode",
-            mode,
-            "--effort",
-            effort,
         ]
+        if quick_prompt is None:
+            command.extend(["--task-file", str(self.task)])
+        else:
+            command.extend(["--prompt", quick_prompt])
+        command.extend(["--mode", mode, "--effort", effort])
         if dry_run:
             command.append("--dry-run")
         return self.run_cmd(command, env=env or self.launcher_env(), check=False)
@@ -200,6 +204,7 @@ class DelegateLauncherTests(unittest.TestCase):
         self.assertNotIn("WORKER_TEST_SECRET", receipt_text)
         self.assertNotIn("SECRET_SESSION_ID", receipt_text)
         receipt = json.loads(receipt_text)
+        self.assertEqual(receipt["input_style"], "strict")
         self.assertEqual(receipt["changed_files"], ["target.txt"])
         self.assertEqual(receipt["tests"], [{"command": "python3 -m unittest", "outcome": "passed"}])
         self.assertEqual(receipt["usage"]["num_turns"], 2)
@@ -268,6 +273,72 @@ class DelegateLauncherTests(unittest.TestCase):
         self.assertNotIn("Bash", args[args.index("--tools") + 1].split(","))
         settings = json.loads(settings_file.read_text(encoding="utf-8"))
         self.assertEqual(settings["sandbox"], {"enabled": False})
+
+    def test_quick_prompt_synthesizes_safe_brief_and_redacts_receipt(self) -> None:
+        prompt_file = self.base / "worker-prompt.txt"
+        result = self.invoke(
+            quick_prompt="QUICK_TASK_SECRET add a focused parser and its tests.",
+            env=self.launcher_env(FAKE_CAPTURE_PROMPT=str(prompt_file)),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        worker_prompt = prompt_file.read_text(encoding="utf-8")
+        for heading in (
+            "# Goal",
+            "# Allowed scope",
+            "# Acceptance criteria",
+            "# Required checks",
+            "# Existing user changes to preserve",
+            "# Forbidden actions",
+        ):
+            self.assertIn(heading, worker_prompt)
+        self.assertIn("QUICK_TASK_SECRET", worker_prompt)
+        self.assertIn("minimal implementation", worker_prompt)
+        self.assertIn("Do not add or update dependencies", worker_prompt)
+        self.assertIn("(clean working tree)", worker_prompt)
+
+        receipt_text = (self.cache / "runs.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("QUICK_TASK_SECRET", receipt_text)
+        receipt = json.loads(receipt_text)
+        self.assertEqual(receipt["input_style"], "quick")
+        self.assertEqual(receipt["model"], "sonnet")
+
+    def test_quick_prompt_rejects_empty_text(self) -> None:
+        result = self.invoke(quick_prompt="   ")
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertIn("must not be empty", payload["concerns"][0])
+
+    def test_quick_prompt_rejects_more_than_32_kib(self) -> None:
+        result = self.invoke(quick_prompt="x" * (32 * 1024 + 1))
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertIn("32 KiB", payload["concerns"][0])
+
+    def test_prompt_and_task_file_are_mutually_exclusive(self) -> None:
+        result = self.run_cmd(
+            [
+                sys.executable,
+                str(LAUNCHER),
+                "--cwd",
+                str(self.repo),
+                "--task-file",
+                str(self.task),
+                "--prompt",
+                "do the work",
+                "--mode",
+                "edit",
+                "--effort",
+                "medium",
+            ],
+            env=self.launcher_env(),
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not allowed with argument", result.stderr)
 
 
 if __name__ == "__main__":

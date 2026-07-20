@@ -23,6 +23,8 @@ from typing import Any, Iterator
 
 
 MODEL = "sonnet"
+MAX_TASK_FILE_BYTES = 256 * 1024
+MAX_QUICK_PROMPT_BYTES = 32 * 1024
 LIMITS = {
     "medium": {"max_turns": 12, "timeout_seconds": 15 * 60},
     "high": {"max_turns": 24, "timeout_seconds": 30 * 60},
@@ -48,7 +50,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Delegate bounded repository work to Claude Code Sonnet."
     )
     parser.add_argument("--cwd", required=True, help="Path inside the target Git repository")
-    parser.add_argument("--task-file", required=True, help="UTF-8 Markdown task brief")
+    task_input = parser.add_mutually_exclusive_group(required=True)
+    task_input.add_argument("--task-file", help="UTF-8 Markdown strict task brief")
+    task_input.add_argument(
+        "--prompt",
+        help="Concise quick-delegation goal; the launcher adds safe defaults",
+    )
     parser.add_argument("--mode", required=True, choices=("review", "test", "edit"))
     parser.add_argument("--effort", required=True, choices=("medium", "high"))
     parser.add_argument(
@@ -129,9 +136,45 @@ def load_task(path: Path) -> str:
         raise PreflightError("Task file must be readable UTF-8 text") from exc
     if not task.strip():
         raise PreflightError("Task file must not be empty")
-    if len(task.encode("utf-8")) > 256 * 1024:
+    if len(task.encode("utf-8")) > MAX_TASK_FILE_BYTES:
         raise PreflightError("Task file exceeds the 256 KiB safety limit")
     return task
+
+
+def build_quick_task(prompt: str) -> str:
+    if not prompt.strip():
+        raise PreflightError("--prompt must not be empty")
+    if len(prompt.encode("utf-8")) > MAX_QUICK_PROMPT_BYTES:
+        raise PreflightError("--prompt exceeds the 32 KiB safety limit")
+    return (
+        "# Goal\n\n"
+        f"{prompt.strip()}\n\n"
+        "# Allowed scope\n\n"
+        "Inspect only enough repository context to identify the minimal implementation. "
+        "Change only files directly required by the goal and their focused tests.\n\n"
+        "# Acceptance criteria\n\n"
+        "Implement the requested behavior without unrelated cleanup or behavior changes. "
+        "Keep the result compatible with the repository's existing conventions.\n\n"
+        "# Required checks\n\n"
+        "Identify and run the smallest relevant local test, lint, or type-check command when "
+        "Bash is available. If Bash is unavailable, report the exact check the supervisor "
+        "should run and do not claim it ran.\n\n"
+        "# Existing user changes to preserve\n\n"
+        "Preserve every pre-existing change from the Git baseline supplied by the launcher.\n\n"
+        "# Forbidden actions\n\n"
+        "Do not add or update dependencies unless the goal explicitly requires it. Do not "
+        "access secrets or the network, invoke another agent, change Git state, commit, push, "
+        "publish, deploy, or modify files outside the minimal scope. Stop as blocked if the "
+        "goal is ambiguous or requires a forbidden action."
+    )
+
+
+def load_task_input(args: argparse.Namespace) -> tuple[str, str]:
+    if args.prompt is not None:
+        return build_quick_task(args.prompt), "quick"
+    if args.task_file is None:  # argparse enforces this; keep a defensive check.
+        raise PreflightError("One of --prompt or --task-file is required")
+    return load_task(Path(args.task_file).expanduser().resolve()), "strict"
 
 
 def git_status(root: Path) -> str:
@@ -558,6 +601,7 @@ def filtered_usage(envelope: dict[str, Any]) -> dict[str, Any]:
 def write_receipt(
     *,
     task: str,
+    input_style: str,
     mode: str,
     effort: str,
     duration_seconds: float,
@@ -576,6 +620,7 @@ def write_receipt(
     receipt = {
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "task_id": hashlib.sha256(task.encode("utf-8")).hexdigest()[:16],
+        "input_style": input_style,
         "model": MODEL,
         "effort": effort,
         "mode": mode,
@@ -658,10 +703,11 @@ def main(argv: list[str] | None = None) -> int:
     before: dict[str, str] = {}
     root: Path | None = None
     task = ""
+    input_style = "strict"
     try:
         validate_platform()
         root = resolve_git_root(Path(args.cwd).expanduser().resolve())
-        task = load_task(Path(args.task_file).expanduser().resolve())
+        task, input_style = load_task_input(args)
         binary = resolve_claude_binary()
         schema = load_schema(skill_dir)
         baseline_status = git_status(root)
@@ -705,7 +751,8 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "status": "completed",
                             "summary": (
-                                f"Preflight passed; would run {MODEL} with {args.effort} effort, "
+                                f"Preflight passed for {input_style} delegation; would run "
+                                f"{MODEL} with {args.effort} effort, "
                                 f"{LIMITS[args.effort]['max_turns']} turns, and "
                                 + (
                                     "file tools only under the detected supervisor sandbox."
@@ -738,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             write_receipt(
                 task=task,
+                input_style=input_style,
                 mode=args.mode,
                 effort=args.effort,
                 duration_seconds=time.monotonic() - started,
@@ -759,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             write_receipt(
                 task=task,
+                input_style=input_style,
                 mode=args.mode,
                 effort=args.effort,
                 duration_seconds=time.monotonic() - started,
@@ -793,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         write_receipt(
             task=task,
+            input_style=input_style,
             mode=args.mode,
             effort=args.effort,
             duration_seconds=time.monotonic() - started,
