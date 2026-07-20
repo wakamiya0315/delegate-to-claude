@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delegate to Claude"
+  short_description: "Delegate bounded coding work to Claude Sonnet"
+  default_prompt: "Use $delegate-to-claude to delegate this bounded task to a supervised Claude Sonnet worker."
