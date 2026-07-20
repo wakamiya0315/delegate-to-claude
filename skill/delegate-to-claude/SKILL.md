@@ -29,7 +29,9 @@ serially.
 
 1. Resolve the skill directory. In Claude Code, use `${CLAUDE_SKILL_DIR}`. In
    Codex, use the directory containing this loaded `SKILL.md`.
-2. Confirm that `claude` is installed and already authenticated. Never obtain,
+2. Confirm that `claude` is installed and already authenticated. Ensure the
+   supervisor sandbox permits Claude Code control-plane traffic to Anthropic;
+   this does not permit worker tools to access the network. Never obtain,
    print, copy, or change API keys.
 3. Record `git status --short` and the relevant diff before dispatch.
 4. Write a temporary Markdown task brief outside the repository with these

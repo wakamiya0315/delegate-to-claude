@@ -10,8 +10,11 @@ from pathlib import Path
 
 
 TARGETS = {
-    "codex": Path(".codex/skills/delegate-to-claude"),
-    "claude": Path(".claude/skills/delegate-to-claude"),
+    "codex": (
+        ("codex", Path(".agents/skills/delegate-to-claude")),
+        ("codex-legacy", Path(".codex/skills/delegate-to-claude")),
+    ),
+    "claude": (("claude", Path(".claude/skills/delegate-to-claude")),),
 }
 
 
@@ -60,13 +63,14 @@ def main() -> int:
     plans: list[tuple[str, Path, str]] = []
     conflicts: list[Path] = []
     for name in selected_targets(args.target):
-        destination = home / TARGETS[name]
-        if same_target(destination, source):
-            plans.append((name, destination, "already installed"))
-        elif destination.exists() or destination.is_symlink():
-            conflicts.append(destination)
-        else:
-            plans.append((name, destination, "create"))
+        for label, relative_destination in TARGETS[name]:
+            destination = home / relative_destination
+            if same_target(destination, source):
+                plans.append((label, destination, "already installed"))
+            elif destination.exists() or destination.is_symlink():
+                conflicts.append(destination)
+            else:
+                plans.append((label, destination, "create"))
 
     if conflicts:
         print("error: refusing to overwrite existing skill paths:", file=sys.stderr)

@@ -32,9 +32,11 @@ with the supervisor.
 - Python 3.9 or newer
 - Git
 - Codex and/or Claude Code with Agent Skills support
+- supervisor permission for Claude Code control-plane traffic to Anthropic
 
 The launcher uses your existing Claude Code login. It does not obtain, print,
-store, or modify API keys.
+store, or modify API keys. Worker tools remain unable to access the network;
+the control-plane permission only lets the `claude` process call Anthropic.
 
 ## Install
 
@@ -52,7 +54,8 @@ Preview all filesystem changes with `--dry-run`.
 
 The installer links the same source directory into:
 
-- `~/.codex/skills/delegate-to-claude`
+- `~/.agents/skills/delegate-to-claude` (current Codex user location)
+- `~/.codex/skills/delegate-to-claude` (legacy Codex compatibility)
 - `~/.claude/skills/delegate-to-claude`
 
 It refuses to overwrite an existing file, directory, or different symlink.
@@ -70,6 +73,17 @@ Use $delegate-to-claude to implement the focused parser fix and run its unit tes
 
 Codex may also select the skill automatically when the task matches its
 description and passes the delegation criteria.
+
+For a non-interactive `codex exec` run under `workspace-write`, allow the
+Claude control-plane connection. Add the receipt cache directory when you want
+the run metadata to persist without a warning:
+
+```bash
+codex exec --sandbox workspace-write \
+  -c sandbox_workspace_write.network_access=true \
+  --add-dir ~/Library/Caches/delegate-to-claude \
+  'Use $delegate-to-claude to review this focused change.'
+```
 
 ## Use from Claude Code
 
@@ -111,7 +125,7 @@ No dependency changes, network access, commit, push, or unrelated cleanup.
 Run the worker:
 
 ```bash
-python3 ~/.codex/skills/delegate-to-claude/scripts/delegate.py \
+python3 ~/.agents/skills/delegate-to-claude/scripts/delegate.py \
   --cwd /path/to/repository \
   --task-file /path/to/task.md \
   --mode edit \
