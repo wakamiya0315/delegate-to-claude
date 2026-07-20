@@ -2,6 +2,14 @@
 
 [English](README.md)
 
+[![CI](https://github.com/wakamiya0315/delegate-to-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/wakamiya0315/delegate-to-claude/actions/workflows/ci.yml)
+
+> [!WARNING]
+> **Experimental / macOS-first。** このプロジェクトは初期releaseであり、production
+> のsecurity boundaryではありません。自動委譲は利用者の既存Claude Code account
+> からrequestを送信し、Claudeのquotaとrate limitを消費します。契約planやAPI設定
+> によっては料金が発生します。
+
 `delegate-to-claude` は、Codex または Claude Code を監督者として維持した
 まま、明確に限定されたリポジトリ作業を新しい Claude Code Sonnet worker
 へ委譲する、両環境共通の Agent Skill です。
@@ -60,6 +68,39 @@ installer は同じSkill正本を次の場所へリンクします。
 Codexを再起動してください。Claude Code起動時に個人skillsディレクトリが存在
 しなかった場合は、Claude Codeも再起動します。以後のリポジトリ更新はsymlink
 経由で反映されます。
+
+## 更新
+
+release notesと変更内容を確認してから、永続cloneをfast-forwardし、冪等なinstaller
+を再実行します。
+
+```bash
+git pull --ff-only
+python3 scripts/install.py --target both
+```
+
+導入先はsymlinkなので、checkoutした変更は新しいCodex／Claude Code sessionから
+有効になります。再現性を優先する場合は、`main`を追従せずrelease tagへ固定して
+ください。
+
+## アンインストール
+
+導入したsymlinkだけを削除します。次のcommandは、同じpathにある通常fileや
+directoryを削除しません。
+
+```bash
+for link in \
+  "$HOME/.agents/skills/delegate-to-claude" \
+  "$HOME/.codex/skills/delegate-to-claude" \
+  "$HOME/.claude/skills/delegate-to-claude"
+do
+  if [ -L "$link" ]; then
+    unlink "$link"
+  fi
+done
+```
+
+symlinkがなくなったことを確認後、不要であれば永続cloneを別途削除してください。
 
 ## Codexから使う
 

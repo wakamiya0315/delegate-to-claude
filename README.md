@@ -2,6 +2,14 @@
 
 [日本語](README_jp.md)
 
+[![CI](https://github.com/wakamiya0315/delegate-to-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/wakamiya0315/delegate-to-claude/actions/workflows/ci.yml)
+
+> [!WARNING]
+> **Experimental / macOS-first.** This project is an early release, not a
+> production security boundary. Automatic delegation sends requests through
+> the user's existing Claude Code account, consumes Claude quota and rate
+> limits, and may incur charges under that account's plan or API configuration.
+
 `delegate-to-claude` is a cross-compatible Agent Skill that lets Codex or
 Claude Code remain the supervisor while delegating bounded repository work to
 a fresh Claude Code Sonnet worker.
@@ -62,6 +70,40 @@ It refuses to overwrite an existing file, directory, or different symlink.
 After a first installation, restart Codex. Restart Claude Code as well if its
 personal skills directory did not exist when the session started. Future
 repository updates are visible through the symlinks.
+
+## Update
+
+Review the release notes and changes before updating, then fast-forward the
+permanent clone and re-run the idempotent installer:
+
+```bash
+git pull --ff-only
+python3 scripts/install.py --target both
+```
+
+Because the installed paths are symlinks, checked-out changes become active in
+new Codex and Claude Code sessions immediately. Pin a release tag instead of
+following `main` when reproducibility is more important than automatic updates.
+
+## Uninstall
+
+Remove only the installed symlinks. The commands below refuse to remove a real
+file or directory at those paths:
+
+```bash
+for link in \
+  "$HOME/.agents/skills/delegate-to-claude" \
+  "$HOME/.codex/skills/delegate-to-claude" \
+  "$HOME/.claude/skills/delegate-to-claude"
+do
+  if [ -L "$link" ]; then
+    unlink "$link"
+  fi
+done
+```
+
+After verifying that the links are gone, remove the permanent clone separately
+if it is no longer needed.
 
 ## Use from Codex
 

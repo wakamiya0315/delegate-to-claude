@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+        python-version:
+          - "3.9"
+          - "3.13"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run offline tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Check Python syntax
+        run: >-
+          python3 -m py_compile
+          scripts/install.py
+          skill/delegate-to-claude/scripts/delegate.py
+          tests/test_delegate.py
+          tests/test_installer.py
+
+      - name: Validate worker result schema
+        run: >-
+          python3 -m json.tool
+          skill/delegate-to-claude/references/worker-result.schema.json
+          > /dev/null
