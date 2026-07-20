@@ -9,25 +9,29 @@
 > production security boundary. Automatic delegation sends requests through
 > the user's existing Claude Code account, consumes Claude quota and rate
 > limits, and may incur charges under that account's plan or API configuration.
+> Version 0.2 delegates routine coding more proactively, so review your usage
+> after upgrading.
 
 `delegate-to-claude` is a cross-compatible Agent Skill that lets Codex or
 Claude Code remain the supervisor while delegating bounded repository work to
 a fresh Claude Code Sonnet worker.
 
 The worker may implement a small change, create or run tests, diagnose a
-failure, or review code. The supervisor still owns task scoping, diff review,
-independent verification, and final approval.
+failure, or review code. A concise quick prompt is enough for routine work; the
+launcher adds the safety and verification defaults. The supervisor still owns
+task scoping, diff review, independent verification, and final approval.
 
 ## Why use it
 
 Flagship models are valuable for architecture, ambiguous decisions, and final
 review, but using them for every mechanical step consumes their token and rate
-limits. This skill delegates only work that is:
+limits. The skill now asks the supervisor to delegate before editing when work
+adds tests, likely changes multiple files, creates a non-trivial module,
+investigates a failure, performs a focused refactor or review, or is likely to
+need more than three repository tool calls.
 
-- precisely scoped;
-- local and reversible;
-- cheaper to verify than to perform in the supervising model; and
-- backed by an objective check such as a diff, test, or focused review.
+Direct editing remains appropriate only for an unambiguous, low-risk change of
+about ten lines or less in one file that needs no test update or investigation.
 
 It deliberately keeps architecture, product judgment, security-sensitive
 changes, broad migrations, secrets, external side effects, and final approval
@@ -107,14 +111,16 @@ if it is no longer needed.
 
 ## Use from Codex
 
-Invoke the skill explicitly:
+Invoke the skill explicitly with a concise task:
 
 ```text
-Use $delegate-to-claude to implement the focused parser fix and run its unit tests.
+Use $delegate-to-claude to add CSV validation to src/parser.py and update its tests.
 ```
 
-Codex may also select the skill automatically when the task matches its
-description and passes the delegation criteria.
+Codex may also select the skill automatically. The description is tuned to
+prefer delegation before routine multi-file, test-writing, diagnosis, refactor,
+and review work. Implicit selection is still a model decision rather than a
+hard enforcement mechanism.
 
 For a non-interactive `codex exec` run under `workspace-write`, allow the
 Claude control-plane connection. Add the receipt cache directory when you want
@@ -132,17 +138,31 @@ codex exec --sandbox workspace-write \
 Invoke the same skill explicitly:
 
 ```text
-/delegate-to-claude review the current authentication diff for regressions
+/delegate-to-claude add CSV validation to src/parser.py and update its tests
 ```
 
-Claude Code may also load the skill automatically. Even when Claude Code is the
-supervisor, the skill starts a separate non-interactive `claude -p` process so
-the worker has fresh context and a fixed Sonnet model.
+Claude Code may also load the skill automatically under the same balanced
+delegation criteria. Even when Claude Code is the supervisor, the skill starts
+a separate non-interactive `claude -p` process so the worker has fresh context
+and a fixed Sonnet model.
 
 ## Direct launcher usage
 
-Normally the supervisor prepares the task brief and runs the launcher. You can
-also exercise it directly. Create a Markdown brief outside the target repository:
+For routine work, pass one concise quick prompt. The launcher synthesizes the
+minimal scope, acceptance, verification, existing-change, and forbidden-action
+sections:
+
+```bash
+python3 ~/.agents/skills/delegate-to-claude/scripts/delegate.py \
+  --cwd /path/to/repository \
+  --prompt "Add CSV validation to src/parser.py and update its focused tests." \
+  --mode edit \
+  --effort medium
+```
+
+Use a strict task file when pre-existing changes overlap the likely scope, more
+than three files may change, or exact acceptance criteria matter. Create the
+Markdown brief outside the target repository:
 
 ```markdown
 # Goal
@@ -177,7 +197,9 @@ python3 ~/.agents/skills/delegate-to-claude/scripts/delegate.py \
 The public arguments are:
 
 - `--cwd`: a path inside the target Git repository; the worker runs at its root
-- `--task-file`: a non-empty UTF-8 Markdown brief, at most 256 KiB
+- exactly one task input:
+  - `--prompt`: a non-empty concise quick goal, at most 32 KiB
+  - `--task-file`: a non-empty UTF-8 strict Markdown brief, at most 256 KiB
 - `--mode review|test|edit`
 - `--effort medium|high`
 - `--dry-run`: validate the setup without starting a worker
@@ -265,8 +287,9 @@ Each real run appends a minimal JSONL receipt to:
 - Linux: `${XDG_CACHE_HOME:-~/.cache}/delegate-to-claude/runs.jsonl`
 
 Set `DELEGATE_TO_CLAUDE_CACHE_DIR` to use another cache directory. Receipts
-contain timestamp, task hash, model, effort, mode, duration, status, changed
-file paths, test command/outcome, and aggregate usage reported by Claude Code.
+contain timestamp, task hash, input style (`quick` or `strict`), model, effort,
+mode, duration, status, changed file paths, test command/outcome, and aggregate
+usage reported by Claude Code.
 They do not contain the task text, source code, worker summary, test details,
 stdout, stderr, or session ID. If the cache is not writable, the run continues
 and emits a warning.

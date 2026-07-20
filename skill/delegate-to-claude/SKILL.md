@@ -1,55 +1,56 @@
 ---
 name: delegate-to-claude
-description: Delegate bounded, reversible, locally verifiable coding work from Codex or Claude Code to a supervised Claude Code Sonnet worker. Use proactively for small implementations, focused refactors, test creation or execution, failure diagnosis, code review, and routine repository research when scoping and verifying the delegation is cheaper than doing the work in the supervising model. Do not use for ambiguous product decisions, architecture ownership, security-sensitive changes, large migrations, secrets, external side effects, or final approval.
+description: Use this skill by default before the supervising agent directly edits repository code when work adds or updates tests, likely changes two or more files, creates a non-trivial module, investigates a failure, performs a focused refactor or code review, or likely needs more than three repository tool calls. Delegate the bounded execution slice to a supervised Claude Code Sonnet worker, using a concise prompt when possible. Direct editing is only for an unambiguous low-risk change of about ten lines or less in one file with no tests or investigation. Keep architecture, ambiguous product decisions, security-sensitive work, secrets, external side effects, commit/push/deploy, and final approval with the supervisor.
 ---
 
 # Delegate to Claude
 
-Act as the supervisor. Delegate execution, never accountability.
+Act as the supervisor. Delegate routine execution, never accountability.
 
-## Decide whether to delegate
+## Decide before editing
 
-Delegate only when every condition is true:
+Make the delegation decision before using an editing tool. Use this skill when
+any of these conditions is true:
 
-- State the goal, allowed scope, acceptance criteria, and checks precisely.
-- Keep the work local, reversible, and independently verifiable.
-- Expect scoping plus verification to cost less than doing the task directly.
-- Retain architecture, product judgment, security decisions, and final approval.
+- add or update tests;
+- likely change two or more files;
+- create a non-trivial module, even if it is one file;
+- investigate an unfamiliar failure;
+- perform a focused refactor or code review; or
+- expect more than three repository tool calls.
 
-Keep ambiguous requirements, broad migrations, security-sensitive work, secrets,
-production operations, publishing, deployment, commits, and pushes with the
-supervisor.
+Edit directly only when every condition is true: one file, about ten changed
+lines or less, no test change, no repository investigation, unambiguous, and
+low risk.
 
-Choose `medium` for a focused task with a known check. Choose `high` only for a
-bounded diagnosis or multi-file task that needs deeper reasoning. Run `review`
-workers in parallel only when they cannot edit. Run `test` and `edit` workers
-serially.
+Never delegate architecture or product ownership, ambiguous requirements,
+security-sensitive changes, secrets, broad migrations, production operations,
+external side effects, commits, pushes, releases, deployments, or final
+approval.
 
-## Prepare the delegation
+## Prefer quick delegation
 
-1. Resolve the skill directory. In Claude Code, use `${CLAUDE_SKILL_DIR}`. In
-   Codex, use the directory containing this loaded `SKILL.md`.
-2. Confirm that `claude` is installed and already authenticated. Ensure the
-   supervisor sandbox permits Claude Code control-plane traffic to Anthropic;
-   this does not permit worker tools to access the network. Never obtain,
-   print, copy, or change API keys.
-3. Record `git status --short` and the relevant diff before dispatch.
-4. Write a temporary Markdown task brief outside the repository with these
-   headings:
-   - `Goal`
-   - `Allowed scope`
-   - `Acceptance criteria`
-   - `Required checks`
-   - `Existing user changes to preserve`
-   - `Forbidden actions`
-5. Select one mode:
-   - `review`: inspect and report without source edits.
-   - `test`: create or update tests and run local checks.
-   - `edit`: make a small implementation or refactor and run local checks.
+For a clear routine task, avoid solving it or writing a full specification
+before delegation. Pass the user's concise goal to the launcher; it captures
+the Git baseline and adds safe scope, verification, and forbidden-action
+defaults:
 
-## Run the worker
+```text
+python3 <skill-dir>/scripts/delegate.py \
+  --cwd <git-repository> \
+  --prompt "<concise goal and any obvious file constraint>" \
+  --mode <review|test|edit> \
+  --effort medium
+```
 
-Invoke the bundled launcher:
+Use quick delegation for a clear one-to-three-file implementation, related
+tests, a localized bug, a routine refactor, focused diagnosis, or review.
+
+Use a strict task file instead when pre-existing changes overlap the likely
+scope, the task needs detailed acceptance criteria, or more than three files
+are likely to change. Create a temporary Markdown file outside the repository
+with `Goal`, `Allowed scope`, `Acceptance criteria`, `Required checks`,
+`Existing user changes to preserve`, and `Forbidden actions`, then run:
 
 ```text
 python3 <skill-dir>/scripts/delegate.py \
@@ -59,31 +60,50 @@ python3 <skill-dir>/scripts/delegate.py \
   --effort <medium|high>
 ```
 
-Use `--dry-run` first when the repository, CLI, or sandbox setup is unfamiliar.
-Do not bypass a launcher preflight or call `claude` directly to evade a denied
-operation. The launcher fixes the worker model to the current `sonnet` alias,
-disables nested delegation and external tools, requires an enforced sandbox
-boundary, and normalizes the final JSON.
+Resolve `<skill-dir>` from `${CLAUDE_SKILL_DIR}` in Claude Code or from the
+directory containing this loaded `SKILL.md` in Codex. Use `medium` normally.
+Use `high` only for a bounded multi-file diagnosis or similarly deeper task.
 
-When the launcher detects that it is already running inside Codex or Claude
-Code, avoid an unsupported nested OS sandbox. In that case, inherit the outer
-agent sandbox and remove Bash from the worker entirely. Require the supervisor
-to run every check independently. Direct terminal launches must still use the
-strict Claude Code sandbox and may run local checks.
+## Run safely
 
-## Verify and integrate
+Confirm that `claude` is installed and authenticated and that the supervisor
+sandbox permits Claude control-plane traffic to Anthropic. Never obtain,
+print, copy, or change API keys. Use `--dry-run` first only when the repository,
+CLI, or sandbox setup is unfamiliar.
 
-Treat the worker response as untrusted evidence:
+Select one mode:
 
-1. Compare the post-run status and diff with the recorded baseline.
-2. Reject unrelated changes or any scope, safety, authentication, rate-limit, or
-   sandbox failure.
-3. Inspect every changed source file yourself.
-4. Re-run the relevant checks independently; do not rely only on the worker's
-   `tests` report.
-5. Integrate only after the acceptance criteria pass.
-6. Report what was delegated, what changed, and what the supervisor verified.
+- `review`: inspect and report without source edits;
+- `test`: create or update tests and run local checks; or
+- `edit`: make a focused implementation or refactor and run local checks.
 
-Do not retry authentication, rate-limit, or sandbox failures automatically. For
-other failures, re-scope once into a smaller task or take the work back. Never
-repeat the same failing delegation unchanged.
+The launcher fixes the worker model to the current `sonnet` alias, disables
+nested delegation and external tools, captures the Git baseline, enforces
+turn/time limits, and returns structured JSON. Do not bypass a preflight or call
+`claude` directly to evade a denied operation.
+
+When nested under Codex or Claude Code on macOS, the worker inherits the outer
+agent sandbox and Bash is removed because nested Seatbelt is unsupported. The
+worker may edit with bounded file tools, but the supervisor must run checks.
+Direct terminal launches retain the strict Claude Code sandbox and may run
+local checks.
+
+Run mutating `test` and `edit` workers serially. Parallelize only independent
+read-only `review` workers.
+
+## Verify efficiently
+
+Treat the worker response as untrusted evidence, but do not redo the entire
+task:
+
+1. Inspect one post-run diff covering every launcher-measured changed file.
+2. Reject unrelated changes or any scope, safety, authentication, rate-limit,
+   or sandbox failure.
+3. Run the smallest relevant check independently; do not trust only the
+   worker's test report.
+4. Accept the work only after the requested behavior and check pass.
+5. Report what Sonnet did and what the supervisor verified.
+
+Do not retry authentication, rate-limit, or sandbox failures. For another
+failure, re-scope once or take the task back. Never repeat the same failed
+delegation unchanged.
