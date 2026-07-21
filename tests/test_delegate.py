@@ -32,6 +32,10 @@ capture_settings = os.environ.get("FAKE_CAPTURE_SETTINGS")
 if capture_settings:
     settings_path = Path(sys.argv[sys.argv.index("--settings") + 1])
     Path(capture_settings).write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
+capture_env_file = os.environ.get("FAKE_CAPTURE_ENV_FILE")
+if capture_env_file:
+    env_path = Path(os.environ["CLAUDE_ENV_FILE"])
+    Path(capture_env_file).write_text(env_path.read_text(encoding="utf-8"), encoding="utf-8")
 worker_prompt = sys.stdin.read()
 capture_prompt = os.environ.get("FAKE_CAPTURE_PROMPT")
 if capture_prompt:
@@ -162,6 +166,7 @@ class DelegateLauncherTests(unittest.TestCase):
         env: dict[str, str] | None = None,
         dry_run: bool = False,
         quick_prompt: str | None = None,
+        bash_policy: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             sys.executable,
@@ -174,6 +179,8 @@ class DelegateLauncherTests(unittest.TestCase):
         else:
             command.extend(["--prompt", quick_prompt])
         command.extend(["--mode", mode, "--effort", effort])
+        if bash_policy is not None:
+            command.extend(["--bash", bash_policy])
         if dry_run:
             command.append("--dry-run")
         return self.run_cmd(command, env=env or self.launcher_env(), check=False)
@@ -205,6 +212,9 @@ class DelegateLauncherTests(unittest.TestCase):
         self.assertNotIn("SECRET_SESSION_ID", receipt_text)
         receipt = json.loads(receipt_text)
         self.assertEqual(receipt["input_style"], "strict")
+        self.assertEqual(receipt["bash_requested"], "auto")
+        self.assertTrue(receipt["bash_enabled"])
+        self.assertEqual(receipt["sandbox_source"], "claude-code")
         self.assertEqual(receipt["changed_files"], ["target.txt"])
         self.assertEqual(receipt["tests"], [{"command": "python3 -m unittest", "outcome": "passed"}])
         self.assertEqual(receipt["usage"]["num_turns"], 2)
@@ -253,7 +263,7 @@ class DelegateLauncherTests(unittest.TestCase):
         self.assertIn("target.txt", payload["changed_files"])
         self.assertTrue(any("Review mode changed" in item for item in payload["concerns"]))
 
-    def test_nested_supervisor_disables_bash_and_claude_sandbox(self) -> None:
+    def test_nested_auto_disables_bash_and_claude_sandbox(self) -> None:
         args_file = self.base / "nested-args.json"
         settings_file = self.base / "nested-settings.json"
         result = self.invoke(
@@ -273,6 +283,102 @@ class DelegateLauncherTests(unittest.TestCase):
         self.assertNotIn("Bash", args[args.index("--tools") + 1].split(","))
         settings = json.loads(settings_file.read_text(encoding="utf-8"))
         self.assertEqual(settings["sandbox"], {"enabled": False})
+        receipt = json.loads((self.cache / "runs.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["bash_requested"], "auto")
+        self.assertFalse(receipt["bash_enabled"])
+        self.assertEqual(receipt["sandbox_source"], "outer-codex")
+
+    def test_nested_require_enables_bash_and_scrubs_sensitive_shell_env(self) -> None:
+        args_file = self.base / "nested-require-args.json"
+        settings_file = self.base / "nested-require-settings.json"
+        env_file = self.base / "nested-require-env.sh"
+        result = self.invoke(
+            bash_policy="require",
+            env=self.launcher_env(
+                CODEX_SANDBOX="seatbelt",
+                FAKE_SECRET_TOKEN="do-not-inherit",
+                FAKE_CAPTURE_ARGS=str(args_file),
+                FAKE_CAPTURE_SETTINGS=str(settings_file),
+                FAKE_CAPTURE_ENV_FILE=str(env_file),
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["tests"][0]["outcome"], "passed")
+        self.assertTrue(any("strict Claude Code sandbox" in item for item in payload["concerns"]))
+
+        args = json.loads(args_file.read_text(encoding="utf-8"))
+        self.assertIn("Bash", args[args.index("--tools") + 1].split(","))
+        settings = json.loads(settings_file.read_text(encoding="utf-8"))
+        self.assertTrue(settings["sandbox"]["enabled"])
+        self.assertTrue(settings["sandbox"]["failIfUnavailable"])
+        self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
+        self.assertIn("unset FAKE_SECRET_TOKEN", env_file.read_text(encoding="utf-8"))
+        self.assertEqual(list((self.base / "session-env").iterdir()), [])
+
+        receipt = json.loads((self.cache / "runs.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["bash_requested"], "require")
+        self.assertTrue(receipt["bash_enabled"])
+        self.assertEqual(receipt["sandbox_source"], "claude-code")
+
+    def test_nested_require_uses_inner_sandbox_in_claude_context(self) -> None:
+        result = self.invoke(
+            bash_policy="require",
+            env=self.launcher_env(CLAUDECODE="1"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((self.cache / "runs.jsonl").read_text(encoding="utf-8"))
+        self.assertTrue(receipt["bash_enabled"])
+        self.assertEqual(receipt["sandbox_source"], "claude-code")
+
+    def test_direct_never_disables_bash_and_invalidates_claimed_tests(self) -> None:
+        args_file = self.base / "direct-never-args.json"
+        result = self.invoke(
+            bash_policy="never",
+            env=self.launcher_env(FAKE_CAPTURE_ARGS=str(args_file)),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["tests"][0]["outcome"], "not_run")
+        args = json.loads(args_file.read_text(encoding="utf-8"))
+        self.assertNotIn("Bash", args[args.index("--tools") + 1].split(","))
+        receipt = json.loads((self.cache / "runs.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["bash_requested"], "never")
+        self.assertFalse(receipt["bash_enabled"])
+        self.assertEqual(receipt["sandbox_source"], "claude-code")
+
+    def test_review_require_fails_closed_before_worker_start(self) -> None:
+        marker = self.base / "worker-called"
+        result = self.invoke(
+            mode="review",
+            bash_policy="require",
+            env=self.launcher_env(FAKE_RUN_MARKER=str(marker)),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertIn("incompatible with review mode", payload["concerns"][0])
+        self.assertFalse(marker.exists())
+
+    def test_require_fails_closed_when_session_env_is_not_writable(self) -> None:
+        marker = self.base / "worker-called"
+        blocked_root = self.base / "not-a-directory"
+        blocked_root.write_text("occupied", encoding="utf-8")
+        result = self.invoke(
+            bash_policy="require",
+            env=self.launcher_env(
+                DELEGATE_TO_CLAUDE_SESSION_ENV_ROOT=str(blocked_root),
+                FAKE_RUN_MARKER=str(marker),
+            ),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertIn("requires a writable UUID-scoped directory", payload["concerns"][0])
+        self.assertFalse(marker.exists())
 
     def test_quick_prompt_synthesizes_safe_brief_and_redacts_receipt(self) -> None:
         prompt_file = self.base / "worker-prompt.txt"

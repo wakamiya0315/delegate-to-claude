@@ -40,7 +40,8 @@ python3 <skill-dir>/scripts/delegate.py \
   --cwd <git-repository> \
   --prompt "<concise goal and any obvious file constraint>" \
   --mode <review|test|edit> \
-  --effort medium
+  --effort medium \
+  --bash auto
 ```
 
 Use quick delegation for a clear one-to-three-file implementation, related
@@ -57,7 +58,8 @@ python3 <skill-dir>/scripts/delegate.py \
   --cwd <git-repository> \
   --task-file <temporary-task-brief.md> \
   --mode <review|test|edit> \
-  --effort <medium|high>
+  --effort <medium|high> \
+  --bash <never|auto|require>
 ```
 
 Resolve `<skill-dir>` from `${CLAUDE_SKILL_DIR}` in Claude Code or from the
@@ -82,11 +84,21 @@ nested delegation and external tools, captures the Git baseline, enforces
 turn/time limits, and returns structured JSON. Do not bypass a preflight or call
 `claude` directly to evade a denied operation.
 
-When nested under Codex or Claude Code on macOS, the worker inherits the outer
-agent sandbox and Bash is removed because nested Seatbelt is unsupported. The
-worker may edit with bounded file tools, but the supervisor must run checks.
-Direct terminal launches retain the strict Claude Code sandbox and may run
-local checks.
+Choose the Bash policy before launching:
+
+- `auto` (default): enable Bash for a direct terminal launch protected by the
+  launcher's strict Claude Code sandbox; disable it in a nested agent session;
+- `never`: disable Bash in every environment; or
+- `require`: require Bash for `test` or `edit` and require the worker's own
+  strict Claude Code sandbox, including repository-scoped writes, blocked
+  secret reads and worker network access, and no unsandboxed fallback.
+
+`--bash require` is invalid for `review`. The launcher creates one UUID-scoped
+directory under `~/.claude/session-env` for the worker and removes it on exit.
+If that directory cannot be created, the strict sandbox is unavailable, or an
+existing outer macOS sandbox rejects nested Seatbelt, the run fails closed. Do
+not bypass the failure. Use `auto` or `never` and let the supervisor run checks.
+When Bash stays disabled, the worker may edit with bounded file tools.
 
 Run mutating `test` and `edit` workers serially. Parallelize only independent
 read-only `review` workers.

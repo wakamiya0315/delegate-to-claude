@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import shutil
 import signal
 import subprocess
@@ -58,6 +59,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--mode", required=True, choices=("review", "test", "edit"))
     parser.add_argument("--effort", required=True, choices=("medium", "high"))
+    parser.add_argument(
+        "--bash",
+        choices=("never", "auto", "require"),
+        default="auto",
+        help=(
+            "Worker Bash policy: never disables it, auto enables it only with the "
+            "launcher's direct sandbox, and require makes it mandatory"
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -281,8 +291,25 @@ def sensitive_environment_names() -> list[str]:
     )
 
 
+def credential_environment_names() -> list[str]:
+    return sorted(
+        {
+            "ANTHROPIC_API_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "NPM_TOKEN",
+            "OPENAI_API_KEY",
+            *sensitive_environment_names(),
+        }
+    )
+
+
 def build_settings(
-    root: Path, session_env_dir: Path | None, nested_supervisor: bool
+    root: Path, session_env_dir: Path | None, use_inner_sandbox: bool
 ) -> dict[str, Any]:
     home = Path.home().resolve()
     project_secrets = discover_project_secrets(root)
@@ -333,29 +360,14 @@ def build_settings(
         home / ".git-credentials",
         *project_secrets,
     ]
-    credential_env = {
-        "ANTHROPIC_API_KEY",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "NPM_TOKEN",
-        "OPENAI_API_KEY",
-        *sensitive_environment_names(),
-    }
-
     settings: dict[str, Any] = {
         "permissions": {
             "deny": permission_denies,
         }
     }
-    if nested_supervisor:
-        settings["sandbox"] = {"enabled": False}
-    else:
+    if use_inner_sandbox:
         if session_env_dir is None:
-            raise PreflightError("Direct execution requires an isolated session environment")
+            raise PreflightError("The strict worker sandbox requires an isolated session environment")
         settings["sandbox"] = {
             "enabled": True,
             "failIfUnavailable": True,
@@ -375,14 +387,16 @@ def build_settings(
                 ],
                 "envVars": [
                     {"name": name, "mode": "deny"}
-                    for name in sorted(credential_env)
+                    for name in credential_environment_names()
                 ],
             },
         }
+    else:
+        settings["sandbox"] = {"enabled": False}
     return settings
 
 
-def build_boundary_prompt(mode: str, nested_supervisor: bool) -> str:
+def build_boundary_prompt(mode: str, bash_enabled: bool) -> str:
     mode_rule = (
         "Do not edit, create, delete, or rename source files. Report findings only."
         if mode == "review"
@@ -399,9 +413,13 @@ def build_boundary_prompt(mode: str, nested_supervisor: bool) -> str:
             "If the task requires a forbidden action or is ambiguous, stop and return status blocked.",
             "Return the required structured result after completing the bounded task.",
     ]
-    if nested_supervisor:
+    if bash_enabled:
         rules.append(
-            "Bash is intentionally unavailable in this nested supervisor run. Do not claim that any command or test executed."
+            "Bash is available only for the smallest relevant local checks. Never use it to access the network, secrets, credentials, Git mutation, or files outside the repository."
+        )
+    else:
+        rules.append(
+            "Bash is intentionally unavailable in this run. Do not claim that any command or test executed."
         )
     return "\n".join(rules)
 
@@ -429,14 +447,14 @@ def build_claude_args(
     settings_path: Path,
     schema: dict[str, Any],
     session_id: str,
-    nested_supervisor: bool,
+    bash_enabled: bool,
 ) -> list[str]:
     if mode == "review":
         tools = allowed_tools = "Glob,Grep,Read"
-    elif nested_supervisor:
-        tools = allowed_tools = "Edit,Glob,Grep,Read,Write"
-    else:
+    elif bash_enabled:
         tools = allowed_tools = "Bash,Edit,Glob,Grep,Read,Write"
+    else:
+        tools = allowed_tools = "Edit,Glob,Grep,Read,Write"
     permission_mode = "dontAsk" if mode == "review" else "acceptEdits"
     return [
         binary,
@@ -465,7 +483,7 @@ def build_claude_args(
         "--settings",
         str(settings_path),
         "--append-system-prompt",
-        build_boundary_prompt(mode, nested_supervisor),
+        build_boundary_prompt(mode, bash_enabled),
         "--output-format",
         "json",
         "--json-schema",
@@ -602,6 +620,9 @@ def write_receipt(
     *,
     task: str,
     input_style: str,
+    bash_requested: str,
+    bash_enabled: bool,
+    sandbox_source: str,
     mode: str,
     effort: str,
     duration_seconds: float,
@@ -621,6 +642,9 @@ def write_receipt(
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "task_id": hashlib.sha256(task.encode("utf-8")).hexdigest()[:16],
         "input_style": input_style,
+        "bash_requested": bash_requested,
+        "bash_enabled": bash_enabled,
+        "sandbox_source": sandbox_source,
         "model": MODEL,
         "effort": effort,
         "mode": mode,
@@ -668,11 +692,38 @@ def session_env_root() -> Path:
     return Path.home() / ".claude" / "session-env"
 
 
-def running_under_agent_supervisor() -> bool:
-    return bool(
-        os.environ.get("CODEX_SANDBOX")
-        or os.environ.get("CLAUDECODE") == "1"
-        or os.environ.get("CLAUDE_CODE_CHILD_SESSION")
+def outer_sandbox_source() -> str | None:
+    if os.environ.get("CODEX_SANDBOX"):
+        return "outer-codex"
+    if os.environ.get("CLAUDECODE") == "1" or os.environ.get(
+        "CLAUDE_CODE_CHILD_SESSION"
+    ):
+        return "outer-claude"
+    return None
+
+
+def resolve_bash_access(
+    policy: str, mode: str, detected_outer_source: str | None
+) -> tuple[bool, str]:
+    sandbox_source = detected_outer_source or "claude-code"
+    if mode == "review":
+        if policy == "require":
+            raise PreflightError("--bash require is incompatible with review mode")
+        return False, sandbox_source
+    if policy == "never":
+        return False, sandbox_source
+    if detected_outer_source is None:
+        return True, sandbox_source
+    if policy == "require":
+        return True, "claude-code"
+    return False, sandbox_source
+
+
+def environment_file_content(bash_enabled: bool, nested_supervisor: bool) -> str:
+    if not (bash_enabled and nested_supervisor):
+        return ""
+    return "".join(
+        f"unset {shlex.quote(name)}\n" for name in credential_environment_names()
     )
 
 
@@ -680,8 +731,17 @@ def running_under_agent_supervisor() -> bool:
 def isolated_session_env(session_id: str) -> Iterator[Path]:
     root = session_env_root()
     directory = root / session_id
-    root.mkdir(parents=True, exist_ok=True)
-    directory.mkdir(mode=0o700)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            if directory.is_dir() and directory.parent == root:
+                shutil.rmtree(directory)
+        raise PreflightError(
+            "The strict Bash sandbox requires a writable UUID-scoped directory under "
+            f"{root}; permit the launcher to create it or disable worker Bash"
+        ) from exc
     try:
         yield directory
     finally:
@@ -704,6 +764,8 @@ def main(argv: list[str] | None = None) -> int:
     root: Path | None = None
     task = ""
     input_style = "strict"
+    bash_enabled = False
+    sandbox_source = "unknown"
     try:
         validate_platform()
         root = resolve_git_root(Path(args.cwd).expanduser().resolve())
@@ -713,7 +775,12 @@ def main(argv: list[str] | None = None) -> int:
         baseline_status = git_status(root)
         before = git_paths(root)
         timeout_seconds = float(LIMITS[args.effort]["timeout_seconds"])
-        nested_supervisor = running_under_agent_supervisor()
+        detected_outer_source = outer_sandbox_source()
+        nested_supervisor = detected_outer_source is not None
+        bash_enabled, sandbox_source = resolve_bash_access(
+            args.bash, args.mode, detected_outer_source
+        )
+        use_inner_sandbox = not nested_supervisor or bash_enabled
         if os.environ.get("DELEGATE_TO_CLAUDE_TESTING") == "1":
             timeout_seconds = float(
                 os.environ.get("DELEGATE_TO_CLAUDE_TIMEOUT_SECONDS", timeout_seconds)
@@ -723,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
             session_id = str(uuid.uuid4())
             session_context = (
                 contextlib.nullcontext(None)
-                if nested_supervisor
+                if not use_inner_sandbox
                 else isolated_session_env(session_id)
             )
             with tempfile.TemporaryDirectory(prefix="delegate-to-claude-") as temp_dir, session_context as session_env_dir:
@@ -731,12 +798,15 @@ def main(argv: list[str] | None = None) -> int:
                 env_file = Path(temp_dir) / "environment.sh"
                 settings_path.write_text(
                     json.dumps(
-                        build_settings(root, session_env_dir, nested_supervisor),
+                        build_settings(root, session_env_dir, use_inner_sandbox),
                         indent=2,
                     ),
                     encoding="utf-8",
                 )
-                env_file.write_text("", encoding="utf-8")
+                env_file.write_text(
+                    environment_file_content(bash_enabled, nested_supervisor),
+                    encoding="utf-8",
+                )
                 claude_args = build_claude_args(
                     binary,
                     args.mode,
@@ -744,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
                     settings_path,
                     schema,
                     session_id,
-                    nested_supervisor,
+                    bash_enabled,
                 )
                 if args.dry_run:
                     print_result(
@@ -754,11 +824,8 @@ def main(argv: list[str] | None = None) -> int:
                                 f"Preflight passed for {input_style} delegation; would run "
                                 f"{MODEL} with {args.effort} effort, "
                                 f"{LIMITS[args.effort]['max_turns']} turns, and "
-                                + (
-                                    "file tools only under the detected supervisor sandbox."
-                                    if nested_supervisor
-                                    else "a strict Claude Code sandbox."
-                                )
+                                f"Bash {'enabled' if bash_enabled else 'disabled'} "
+                                f"under {sandbox_source}."
                             ),
                             "changed_files": [],
                             "tests": [],
@@ -786,6 +853,9 @@ def main(argv: list[str] | None = None) -> int:
             write_receipt(
                 task=task,
                 input_style=input_style,
+                bash_requested=args.bash,
+                bash_enabled=bash_enabled,
+                sandbox_source=sandbox_source,
                 mode=args.mode,
                 effort=args.effort,
                 duration_seconds=time.monotonic() - started,
@@ -808,6 +878,9 @@ def main(argv: list[str] | None = None) -> int:
             write_receipt(
                 task=task,
                 input_style=input_style,
+                bash_requested=args.bash,
+                bash_enabled=bash_enabled,
+                sandbox_source=sandbox_source,
                 mode=args.mode,
                 effort=args.effort,
                 duration_seconds=time.monotonic() - started,
@@ -828,21 +901,30 @@ def main(argv: list[str] | None = None) -> int:
             result["concerns"].append(
                 "Review mode changed repository files; reject the result and inspect the diff."
             )
-        if nested_supervisor:
+        if not bash_enabled:
             for test in result["tests"]:
                 if isinstance(test, dict):
                     test["outcome"] = "not_run"
                     test["details"] = (
-                        "Bash is disabled for a worker nested under an agent supervisor; "
+                        "Bash is disabled for this worker; "
                         "the supervisor must run this check independently."
                     )
             if args.mode in MUTATING_MODES:
                 result["concerns"].append(
-                    "Bash was disabled because the worker inherited an outer agent sandbox; the supervisor must run required checks independently."
+                    f"Bash was disabled by --bash {args.bash} under {sandbox_source}; "
+                    "the supervisor must run required checks independently."
                 )
+        elif nested_supervisor:
+            result["concerns"].append(
+                "Nested Bash was enabled by --bash require inside the launcher's strict "
+                "Claude Code sandbox; the supervisor must still review and rerun the check."
+            )
         write_receipt(
             task=task,
             input_style=input_style,
+            bash_requested=args.bash,
+            bash_enabled=bash_enabled,
+            sandbox_source=sandbox_source,
             mode=args.mode,
             effort=args.effort,
             duration_seconds=time.monotonic() - started,

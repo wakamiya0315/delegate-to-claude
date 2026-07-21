@@ -9,8 +9,10 @@
 > production security boundary. Automatic delegation sends requests through
 > the user's existing Claude Code account, consumes Claude quota and rate
 > limits, and may incur charges under that account's plan or API configuration.
-> Version 0.2 delegates routine coding more proactively, so review your usage
-> after upgrading.
+> Version 0.2 delegates routine coding more proactively. Version 0.2.1 also
+> lets the supervisor explicitly require Bash, but only inside the worker's
+> strict Claude Code sandbox. An already sandboxed nested session may therefore
+> fail closed on macOS. Review usage and Bash receipts after upgrading.
 
 `delegate-to-claude` is a cross-compatible Agent Skill that lets Codex or
 Claude Code remain the supervisor while delegating bounded repository work to
@@ -157,7 +159,8 @@ python3 ~/.agents/skills/delegate-to-claude/scripts/delegate.py \
   --cwd /path/to/repository \
   --prompt "Add CSV validation to src/parser.py and update its focused tests." \
   --mode edit \
-  --effort medium
+  --effort medium \
+  --bash auto
 ```
 
 Use a strict task file when pre-existing changes overlap the likely scope, more
@@ -191,7 +194,8 @@ python3 ~/.agents/skills/delegate-to-claude/scripts/delegate.py \
   --cwd /path/to/repository \
   --task-file /path/to/task.md \
   --mode edit \
-  --effort medium
+  --effort medium \
+  --bash auto
 ```
 
 The public arguments are:
@@ -202,17 +206,30 @@ The public arguments are:
   - `--task-file`: a non-empty UTF-8 strict Markdown brief, at most 256 KiB
 - `--mode review|test|edit`
 - `--effort medium|high`
+- `--bash never|auto|require` (default: `auto`)
 - `--dry-run`: validate the setup without starting a worker
 
 `medium` allows up to 12 agent turns and 15 minutes. `high` allows up to
 24 turns and 30 minutes. The model is always the current `sonnet` alias.
 
-macOS does not support nesting Claude Code's Seatbelt sandbox inside an existing
-Codex or Claude Code sandbox. When the launcher detects a nested agent session,
-it inherits the outer sandbox and removes Bash from the worker tool set. The
-worker can still review or edit through bounded file tools, but the supervisor
-must run every command and test independently. A direct terminal launch uses
-Claude Code's strict sandbox and can run local checks normally.
+An existing macOS Seatbelt sandbox may reject a second Claude Code sandbox.
+For `test` and `edit`, Bash policy therefore behaves as follows (`review`
+always disables Bash):
+
+| Policy | Direct terminal | Nested Codex/Claude Code |
+| --- | --- | --- |
+| `never` | Disabled | Disabled |
+| `auto` | Enabled in the launcher's strict sandbox | Disabled |
+| `require` | Required in the launcher's strict sandbox | Required in the worker's strict sandbox; fail closed if unavailable |
+
+`require` is invalid for `review`. It never treats a supervisor assertion or an
+unknown outer boundary as sufficient. The launcher requires repository-limited
+writes, blocked secret reads and worker network access, and disabled
+unsandboxed fallback in its own worker sandbox. It creates one UUID-scoped
+directory under `~/.claude/session-env` and removes it on exit. If that directory
+or the sandbox cannot be used, including unsupported nested Seatbelt, the run
+fails closed. Keep `auto` or select `never` when the supervisor can run every
+command and test independently.
 
 ## Modes
 
@@ -254,23 +271,29 @@ dirty before delegation.
 
 Every worker run:
 
-- uses Claude Code's strict OS sandbox for direct terminal launches and a
-  detected outer agent sandbox for nested launches, failing closed when neither
-  boundary is available;
-- denies sandbox escape and network domains;
+- uses Claude Code's strict OS sandbox whenever Bash is enabled; Bash-disabled
+  nested launches remain inside the detected outer agent sandbox;
+- denies sandbox escape and all worker network domains in every
+  launcher-managed Bash sandbox, failing closed if it cannot establish one;
 - restricts writes to the repository, the sandbox session temp directory, and
   one UUID-scoped `~/.claude/session-env` metadata directory that the launcher
   creates for the run and removes on exit;
-- blocks common credential files and environment tokens;
+- blocks common credential files and environment tokens in every
+  launcher-managed Bash sandbox and unsets detected credential/token variables
+  from nested Bash;
 - disables slash commands, nested agents, MCP, and browser tools;
 - blocks Claude/Codex recursion, Git mutation, commit, push, publishing, and
   deployment commands; and
 - never uses `bypassPermissions`.
 
-For a nested Codex or Claude Code invocation, the verified outer agent sandbox
-replaces the inner Claude sandbox and Bash is unavailable to the worker. This
-prevents an unsafe unsandboxed shell fallback while avoiding unsupported nested
-Seatbelt execution.
+For a nested Codex or Claude Code invocation, the default `auto` policy keeps
+Bash unavailable and uses the detected outer agent boundary. Selecting
+`require` instead demands a separate launcher-managed strict worker sandbox; it
+does not trust the outer boundary as a substitute. If macOS rejects that nested
+sandbox or the UUID-scoped session environment cannot be created, the launcher
+returns a sandbox failure without starting or accepting the worker. Nested Bash
+also receives an environment file that unsets detected credential and token
+variables.
 
 The sandbox is a boundary, not a substitute for supervision. An edit worker can
 still make an incorrect change inside the repository. Always inspect the diff
@@ -287,9 +310,10 @@ Each real run appends a minimal JSONL receipt to:
 - Linux: `${XDG_CACHE_HOME:-~/.cache}/delegate-to-claude/runs.jsonl`
 
 Set `DELEGATE_TO_CLAUDE_CACHE_DIR` to use another cache directory. Receipts
-contain timestamp, task hash, input style (`quick` or `strict`), model, effort,
-mode, duration, status, changed file paths, test command/outcome, and aggregate
-usage reported by Claude Code.
+contain timestamp, task hash, input style (`quick` or `strict`), requested Bash
+policy, actual Bash state, sandbox source, model, effort, mode, duration,
+status, changed file paths, test command/outcome, and aggregate usage reported
+by Claude Code.
 They do not contain the task text, source code, worker summary, test details,
 stdout, stderr, or session ID. If the cache is not writable, the run continues
 and emits a warning.

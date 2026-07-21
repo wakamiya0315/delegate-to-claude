@@ -1,6 +1,6 @@
 interface:
   display_name: "Delegate to Claude"
   short_description: "Delegate routine coding to Claude Sonnet"
-  default_prompt: "Use $delegate-to-claude to hand this routine coding task to a supervised Sonnet worker with a concise prompt."
+  default_prompt: "Use $delegate-to-claude to hand this routine coding task to a supervised Sonnet worker and choose the safest Bash policy."
 policy:
   allow_implicit_invocation: true
