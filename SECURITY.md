@@ -43,3 +43,13 @@ leakage, scope enforcement failure, and worker recursion.
 General model-quality disagreements, expected Claude quota consumption, and
 fail-closed behavior caused by unavailable authentication, sandboxing, or rate
 limits are not security vulnerabilities by themselves.
+
+## Bash policy
+
+Version 0.2.1 adds `--bash never|auto|require`. `require` is available only for
+`test` and `edit`; it requires the worker's own strict Claude Code sandbox and
+never treats a supervisor assertion or an unknown outer boundary as sufficient.
+The launcher fails closed if the sandbox or its isolated UUID-scoped session
+environment cannot be created. On macOS, this includes an existing Seatbelt
+sandbox rejecting a nested sandbox. Do not work around that failure with
+`bypassPermissions` or unsandboxed execution.
